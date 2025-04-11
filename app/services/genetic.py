@@ -1,11 +1,83 @@
+from fastapi import  HTTPException
 import numpy as np
 import random
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import matplotlib.pyplot as plt
+from bson import ObjectId
 
-from app.database import users_collection, vectors_collection
+from app.database import users_collection, vectors_collection, jobs_collection
+
+async def get_job_candidates(job_id: str):
+    """Récupère les candidats associés à un job"""
+    job = await jobs_collection.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        return []
+    
+    users = await users_collection.find({"job_id": job_id}).to_list(None)
+    # return [format_user(user) for user in users]
+    return [user for user in users]
+
+async def get_job_candidates_data(job_id: str):
+    """Récupère les vecteurs et les utilisateurs associés à un job donné"""
+    try:
+        # Assurez-vous que le job existe
+        job = await jobs_collection.find_one({"_id": ObjectId(job_id)})
+        if not job:
+            raise HTTPException(404, "Job not found")
+
+        # Récupérer tous les utilisateurs liés au job
+        users = await users_collection.find({"job_id": job_id}).to_list(None)
+        if not users:
+            return {"vectors": [], "user_vector_map": []}
+
+        # Récupérer les vecteurs pour ces utilisateurs
+        user_ids = [str(user["_id"]) for user in users]
+        vectors = await vectors_collection.find({"user_id": {"$in": user_ids}}).to_list(None)
+
+        # Créer un mapping user_id -> vector
+        user_vector_dict = {v["user_id"]: v["vector"] for v in vectors}
+
+        # Construire la liste des vecteurs
+        vectors_only = [user_vector_dict.get(str(user["_id"]), []) for user in users]
+
+        # Construire le lien complet candidat + vecteur
+        user_vector_map = [
+            {"user": user, "vector": user_vector_dict.get(str(user["_id"]), [])}
+            for user in users
+        ]
+
+        return {
+            "vectors": vectors_only,
+            "user_vector_map": user_vector_map
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Erreur lors de la récupération des vecteurs candidats : {str(e)}")
+
+def get_user_by_id(user_id, collection):
+    """
+    Récupère un utilisateur à partir de son ID dans une collection MongoDB.
+
+    :param user_id: str ou ObjectId - L'ID de l'utilisateur
+    :param collection: Collection MongoDB (ex: users_collection)
+    :return: dict ou None - L'utilisateur trouvé ou None
+    """
+    try:
+        # Convertir en ObjectId si ce n'est pas déjà le cas
+        if not isinstance(user_id, ObjectId):
+            user_id = ObjectId(user_id)
+        return collection.find_one({'_id': user_id})
+    except Exception as e:
+        print(f"Erreur lors de la recherche de l'utilisateur: {e}")
+        return None
+    
+def serialize_mongo_document(doc):
+    if not doc:
+        return None
+    doc["_id"] = str(doc["_id"])
+    return doc
 
 class CandidateModel:
     """
@@ -67,7 +139,8 @@ class GeneticAlgorithm:
     """
     Real-Coded Genetic Algorithm for optimizing candidate selection.
     """
-    def __init__(self, population_size, generations, mutation_rate, crossover_rate, X_max, a_min, a_max):
+    def __init__(self, job_id: str, population_size, generations, mutation_rate, crossover_rate, X_max, a_min, a_max):
+        self.job_id = job_id
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
@@ -95,28 +168,46 @@ class GeneticAlgorithm:
         # Current generation (for history)
         self.current_generation = 0
     
-    async def initialize_population(self):
-        """Récupère les vecteurs depuis MongoDB"""
-        population = []
+    # async def initialize_population(self):
+    #     """Récupère les candidats associés au job"""
+    #     job_candidates = await get_job_candidates_data(self.job_id)
         
-        vectors = await vectors_collection.find().to_list(None)
-        print(f"{len(vectors)} vecteurs trouvés.")
+    #     self.full_job_candidates = job_candidates["user_vector_map"]
+    #     return job_candidates["vectors"]
+    
+    async def initialize_population(self):
+        """Récupère les candidats associés au job"""
+        job_candidates = await get_job_candidates_data(self.job_id)
 
-        i = 0
-        for vec in vectors:
-            if "vector" not in vec:
-                print("Vecteur absent:", vec)
-                continue
-            
-            vector = vec["vector"]
-            population.append(vector)
-            self.candidate_id_map[tuple(vector)] = i
-            i += 1
+        user_vector_map = job_candidates["user_vector_map"]
+        
+        # On ne garde que les vecteurs non vides
+        vectors_only = [entry["vector"] for entry in user_vector_map if entry["vector"]]
 
-        self.id_to_vector_map = {v: k for k, v in self.candidate_id_map.items()}
-        print(f"Population initialisée avec {len(population)} vecteurs.")
 
-        return np.array(population)
+        # On stocke les mappings ID -> vecteur et vecteur -> ID pour le reste de l’algo
+        self.id_to_vector_map = {
+            str(entry["user"]["_id"]): entry["vector"]
+            for entry in user_vector_map if entry["vector"]
+        }
+        self.candidate_id_map = {
+            tuple(entry["vector"]): str(entry["user"]["_id"])
+            for entry in user_vector_map if entry["vector"]
+        }
+        self.id_to_user_map = {
+            str(entry["user"]["_id"]): entry["user"]
+            for entry in user_vector_map if entry["vector"]
+        }
+        
+        self.vector_to_user = {
+            tuple(entry["vector"]): entry["user"]
+            for entry in user_vector_map if entry["vector"]
+        }
+
+        # tous les utilisateurs avec leur vecteur pour référence
+        self.full_job_candidates = user_vector_map
+
+        return  vectors_only
 
     def fitness_function(self, candidate):
         """Evaluates the quality (fitness) of a candidate."""
@@ -316,7 +407,8 @@ class GeneticAlgorithm:
         self.weights = weights
         # print("candidates: ", population)
         population = await self.initialize_population()
-
+        # print("Appropriates candidates:", population[1:])
+        population = [vector_c  for vector_c in population if vector_c]
         
         for generation in range(self.generations):
             self.current_generation = generation
@@ -367,7 +459,7 @@ class GeneticAlgorithm:
             combined_mutation_flags = mutation_flags + [False] * len(offspring)
             combined_crossover_flags = crossover_flags + [False] * len(population)
 
-            population = self.final_selection(
+            population_after = self.final_selection(
                 combined_population,
                 combined_fitness,
                 combined_mutation_flags,
@@ -394,12 +486,18 @@ class GeneticAlgorithm:
 
         # Return the list of initial candidates ranked by their final score
         # and the dictionary of final scores (key = ID, value = score).
-        # To reconstruct the vector, use self.id_to_vector_map[ID].
+        # To reconstruct the vector, use self.id_to_vector_map[ID]. self.vector_to_user.get(tuple(
+        # print("Tous les users: ", self.id_to_vector_map)    
         sorted_ids = sorted(final_scores, key=final_scores.get, reverse=True)
-        ranked_candidates = [(cid, self.id_to_vector_map[cid], final_scores[cid]) for cid in sorted_ids]
+
+        ranked_candidates = []
+        for cid in sorted_ids:
+            # user = await get_user_by_id(cid, users_collection)
+            raw_user = await get_user_by_id(cid, users_collection)
+            user = serialize_mongo_document(raw_user)
+            ranked_candidates.append((cid, user, final_scores[cid]))
 
         return ranked_candidates, final_scores
-    
 
 def plot_all_candidates_evolution_with_id(history):
     """

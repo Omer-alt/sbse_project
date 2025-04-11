@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
+from bson import ObjectId
 from app.models import CandidateCreate
-from app.database import users_collection, vectors_collection
+from app.database import users_collection, vectors_collection, jobs_collection
 from app.models import UserCreate, UserResponse, UserVector
 
 router = APIRouter(tags=["Candidates"])
@@ -23,14 +24,14 @@ education_mapping = {
     "Doctor": 8
 }
 
-@router.post("/candidates/")
-async def create_candidate(candidate: CandidateCreate):
-    candidates_db.append(candidate.dict())
-    return {"message": "Candidate added successfully"}
+# @router.post("/candidates/")
+# async def create_candidate(candidate: CandidateCreate):
+#     candidates_db.append(candidate.dict())
+#     return {"message": "Candidate added successfully"}
 
-@router.get("/candidates/")
-async def get_all_candidates():
-    return candidates_db
+# @router.get("/candidates/")
+# async def get_all_candidates():
+#     return candidates_db
 
 
 router = APIRouter(tags=["Users"])    
@@ -100,3 +101,28 @@ async def list_users():
         del user["_id"]
         users.append(user)
     return users
+
+
+@router.put("/users/{user_id}/assign-job")
+async def assign_user_to_job(user_id: str, job_id: str):
+    try:
+        # Vérifier que le job existe
+        job = await jobs_collection.find_one({"_id": ObjectId(job_id)})
+        if not job:
+            raise HTTPException(404, "Job not found")
+        
+        # Mettre à jour l'utilisateur
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"job_id": job_id}}
+        )
+        
+        # Ajouter l'utilisateur au job
+        await jobs_collection.update_one(
+            {"_id": ObjectId(job_id)},
+            {"$addToSet": {"users": user_id}}
+        )
+        
+        return {"message": "User successfully assigned to job"}
+    except Exception as e:
+        raise HTTPException(400, f"Assignment failed: {str(e)}")
