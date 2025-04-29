@@ -49,22 +49,18 @@ async def genetic_optimization(request: GeneticRequest):
         # Exécuter l'optimisation
         ranked_candidates, final_scores = await ga.run(weights)
         
-        print("Classe", ranked_candidates)
+        # print("Classe", ranked_candidates)
         
-        # Formater la réponse "vector": vector.tolist() if isinstance(vector, np.ndarray) else vector,
-        response = {
-            "ranked_candidates": [
-                {
-                    "rank": rank,
-                    "id": cid,
-                    "vector": vector,
-                    "score": float(score)
-                }
-                for rank, (cid, vector, score) in enumerate(ranked_candidates, 1)
-            ],
-            "final_scores": {k: float(v) for k, v in final_scores.items()}
-        }
-        
+        response = [
+            {
+                "rank": rank,
+                "id": cid,
+                "score": float(score),
+                **{k: v for k, v in vector.items() if k != "_id"}  # Exclure "_id" car déjà présent dans "id"
+            }
+            for rank, (cid, vector, score) in enumerate(ranked_candidates, 1)
+        ]
+
         return response
         
     except Exception as e:
